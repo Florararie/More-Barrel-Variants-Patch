@@ -10,9 +10,11 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Brightness;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -118,6 +120,8 @@ public record PolyBarrelBlock(Block block, String wood) implements PolymerBlock,
         private float yaw;
         private float pitch;
         private boolean flipped;
+        private int skyLight = -1;
+        private int blockLight = -1;
 
         /**
          * Takes the state from the caller instead of reading it: Polymer creates element holders from
@@ -151,6 +155,36 @@ public record PolyBarrelBlock(Block block, String wood) implements PolymerBlock,
         }
 
         /**
+         * Lights the display from the space around the barrel instead of from the barrel's own block.
+         *
+         * <p>A client draws a display entity with the light of the block it stands in, and this one
+         * always stands inside the barrel, which is a solid block. A solid block has no light inside
+         * it, and a vanilla client is sent those light values with the chunk and never revises them
+         * for a block that does not change, so a barrel that was placed while its own cell still
+         * counted as air comes back from a rejoin in the dark and only lights up once some other
+         * block update makes the client rebuild the light around it.
+         *
+         * <p>Taking the brightest of the six neighbouring cells is how bright the space a barrel
+         * stands in is, which is the light a player expects a barrel to be drawn with. The brightness
+         * is part of the display's synced data, so it is already correct when the entity is spawned,
+         * and it only costs a packet when the light around the barrel actually changes.
+         */
+        private void applyBrightness() {
+            int sky = 0;
+            int block = 0;
+            for (Direction direction : Direction.values()) {
+                BlockPos neighbour = this.pos.relative(direction);
+                sky = Math.max(sky, this.world.getBrightness(LightLayer.SKY, neighbour));
+                block = Math.max(block, this.world.getBrightness(LightLayer.BLOCK, neighbour));
+            }
+            if (sky != this.skyLight || block != this.blockLight) {
+                this.skyLight = sky;
+                this.blockLight = block;
+                this.element.setBrightness(new Brightness(block, sky));
+            }
+        }
+
+        /**
          * Follows the barrel every tick. The server flips the block's open property while a player has
          * the barrel open, so that property is all the display needs to swap between the closed and
          * open model, and re-reading it also keeps the facing honest after a rotation or a clone.
@@ -165,6 +199,8 @@ public record PolyBarrelBlock(Block block, String wood) implements PolymerBlock,
             if (state.getBlock() != this.barrel.block()) {
                 return;
             }
+
+            this.applyBrightness();
 
             boolean open = isOpen(state);
             if (open != this.open) {
